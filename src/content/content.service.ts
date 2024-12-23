@@ -15,6 +15,7 @@ import { AxiosError } from 'axios';
 export class ContentService {
   
   private readonly middlewareUrl: string;
+  private readonly framework: string;
   private readonly logger = new Logger(ContentService.name); // Define the logger
 
   constructor(
@@ -22,6 +23,7 @@ export class ContentService {
     private readonly courseService: CourseService // Inject CourseService here
   ) {
     this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_QA_URL') || 'https://qa-middleware.tekdinext.com';
+    this.framework = this.configService.get<string>('FRAMEWORK') || 'scp-framework';
   }
 
   async processCsvAndCreateContent(file: Express.Multer.File, userId: string, userToken: string) {
@@ -184,26 +186,41 @@ export class ContentService {
     try {
       const { v4: uuidv4 } = require('uuid');
       const path = require('path');
-      const mime = require('mime-types'); // Install mime-types if not already installed
+      const mime = require('mime-types'); // Ensure mime-types is installed
+  
+      const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
+      const isYouTubeURL = YOUTUBE_URL_REGEX.test(documentUrl);
   
       const uniqueCode = uuidv4();
+      let mimeType: string | false = false;
+      let fileUrl: string = documentUrl; // Default to documentUrl
+      let tempFilePath: string | null = null;
+
+      // Framework fields
+      const additionalFields = {
+        state: ["Maharashtra"],
+        board: ["Maharashtra Education Board"],
+        medium: ["Marathi"],
+        gradeLevel: ["Grade 10"],
+        courseType: ["Foundation Course"],
+        subject: ["Hindi"],
+        isForOpenSchool: ["Yes"],
+        program: ["Second Chance"],
+      };
   
-      // Detect file extension from URL
-      const fileExtension = path.extname(new URL(documentUrl).pathname).slice(1); // e.g., 'pdf'
-      const mimeType = mime.lookup(fileExtension); // Get MIME type from extension
-  
-      if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
-        throw new Error(`Unsupported file type: ${fileExtension}`);
-      }
+      // Step 1: Create Content
+      mimeType = isYouTubeURL ? 'video/x-youtube' : mime.lookup(path.extname(new URL(documentUrl).pathname).slice(1)) || 'application/octet-stream';
   
       const payload = {
         request: {
           content: {
             name: title,
             code: uniqueCode,
-            mimeType: mimeType || 'application/octet-stream',
+            mimeType: mimeType,
             primaryCategory: primaryCategory,
+            framework: this.framework,
             createdBy: userId || '15155b7a-5316-4bb2-992a-772093e85f44',
+            ...additionalFields, // Merged dynamic fields here
           },
         },
       };
@@ -218,9 +235,7 @@ export class ContentService {
         Authorization: `Bearer ${userToken}`,
         "X-Channel-Id": this.configService.get<string>('X_CHANNEL_ID'),
       };
-  
-      console.log(headers);
-  
+    
       const createResponse = await axios.post(
         `${this.middlewareUrl}/action/content/v3/create`,
         payload,
@@ -230,54 +245,70 @@ export class ContentService {
       const { identifier: doId, versionKey } = createResponse.data.result;
       console.log('Content created:', { doId, versionKey });
   
-      // Step 2: Download Document
-      const documentResponse = await axios.get(documentUrl, { responseType: 'stream' });
-      const tempFilePath = `/tmp/${uniqueCode}.${fileExtension}`;
-      const writer = fs.createWriteStream(tempFilePath);
-      documentResponse.data.pipe(writer);
+      // Step 2: Handle Upload Logic
+      if (isYouTubeURL) {
+        // Use YouTube URL directly, skip file upload
+        this.logger.log('YouTube URL detected, skipping file download and S3 upload.');
+        fileUrl = documentUrl; // Directly use the YouTube URL
+      } else {
+        // Handle Regular File URLs
+        const fileExtension = path.extname(new URL(documentUrl).pathname).slice(1);
   
-      await new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-      });
+        if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
+          throw new Error(`Unsupported file type: ${fileExtension}`);
+        }
   
-      // Step 3: Upload Document to AWS S3
-      AWS.config.update({
-        accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
-        region: this.configService.get<string>('AWS_REGION'),
-      });
+        // Step 2.1: Download Document
+        const documentResponse = await axios.get(documentUrl, { responseType: 'stream' });
+        tempFilePath = `/tmp/${uniqueCode}.${fileExtension}`;
+        const writer = fs.createWriteStream(tempFilePath);
+        documentResponse.data.pipe(writer);
   
-      const s3 = new AWS.S3();
-      const bucketName = this.configService.get<string>('AWS_BUCKET_NAME') || '';
+        await new Promise((resolve, reject) => {
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
   
-      // Create the file path
-      const s3Key = `content/assets/${doId}/file.${fileExtension}`;
+        // Step 2.2: Upload to AWS S3
+        AWS.config.update({
+          accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID'),
+          secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
+          region: this.configService.get<string>('AWS_REGION'),
+        });
   
-      const uploadResponse = await s3
-        .upload({
-          Bucket: bucketName,
-          Key: s3Key,
-          Body: fs.createReadStream(tempFilePath),
-          ContentType: mimeType || 'application/octet-stream',
-        })
-        .promise();
+        const s3 = new AWS.S3();
+        const bucketName = this.configService.get<string>('AWS_BUCKET_NAME') || '';
+        const s3Key = `content/assets/${doId}/file.${fileExtension}`;
   
-      console.log('Upload successful:', uploadResponse);
+        const uploadResponse = await s3
+          .upload({
+            Bucket: bucketName,
+            Key: s3Key,
+            Body: fs.createReadStream(tempFilePath),
+            ContentType: mimeType || 'application/octet-stream',
+          })
+          .promise();
   
-      // Clean up the temporary file
-      fs.unlinkSync(tempFilePath);
+        console.log('Upload successful:', uploadResponse);
   
-      // Generate the file URL
-      const fileUrl = `https://${bucketName}.s3-${AWS.config.region}.amazonaws.com/${s3Key}`;
-      console.log('File accessible at:', fileUrl);
+        // Step 2.3: Generate the S3 URL
+        fileUrl = `https://${bucketName}.s3-${AWS.config.region}.amazonaws.com/${s3Key}`;
   
-      return { doId, versionKey, fileUrl, uploadResponse };
+        // Clean up the temporary file
+        fs.unlinkSync(tempFilePath);
+      }
+  
+      // Step 3: Return Response
+      // console.log('Final File URL:', fileUrl);
+      // console.log('doId:', doId);
+      return { doId, versionKey, fileUrl };
+  
     } catch (error) {
      // console.error("Error creating or uploading content:", error.message || error);
      // throw error;
     }
   }
+  
   
 
   private async uploadContent(contentId: string, fileUrl: string, userToken: string) {
@@ -285,64 +316,87 @@ export class ContentService {
       const path = require('path');
       const mime = require('mime-types'); // Ensure this library is installed
   
-      // Step 1: Extract file extension dynamically
-      const fileExtension = path.extname(new URL(fileUrl).pathname).slice(1); // e.g., 'pdf'
-      const mimeType = mime.lookup(fileExtension); // Dynamically determine MIME type
+      const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
   
-      if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
-        throw new Error(`Unsupported file type: ${fileExtension}`);
+      // Check if the URL is a YouTube URL
+      const isYouTubeURL = YOUTUBE_URL_REGEX.test(fileUrl);
+  
+      let mimeType: string | false = false;
+      let tempFilePath: string | null = null;
+  
+      if (isYouTubeURL) {
+        this.logger.log('YouTube URL detected, skipping file download and S3 upload.');
+  
+        mimeType = 'text/html'; // YouTube URLs are typically treated as HTML links
+  
+      } else {
+        // Step 1: Extract file extension and MIME type dynamically
+        const fileExtension = path.extname(new URL(fileUrl).pathname).slice(1); // e.g., 'pdf'
+        mimeType = mime.lookup(fileExtension) || 'application/octet-stream';
+  
+        if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
+          throw new Error(`Unsupported file type: ${fileExtension}`);
+        }
+  
+        // Step 2: Download the file dynamically with its correct extension
+        tempFilePath = await this.downloadFileToTemp(fileUrl, `upload_${Date.now()}.${fileExtension}`);
+  
+        if (!fs.existsSync(tempFilePath)) {
+          throw new Error(`File not found at ${tempFilePath}`);
+        }
+  
+        const stats = fs.statSync(tempFilePath);
+        // console.log(`File size: ${stats.size} bytes`);
+        // console.log(`File downloaded to: ${tempFilePath}`);
       }
   
-      // Step 2: Download the file dynamically with its correct extension
-      const tempFilePath = await this.downloadFileToTemp(fileUrl, `upload_${Date.now()}.${fileExtension}`);
-  
-      if (!fs.existsSync(tempFilePath)) {
-        throw new Error(`File not found at ${tempFilePath}`);
-      }
-  
-      const stats = fs.statSync(tempFilePath);
-      console.log(`File size: ${stats.size} bytes`);
-      console.log(`File downloaded to: ${tempFilePath}`);
-  
-      // Step 3: Attach file dynamically to FormData
+      // Step 3: Prepare FormData and Payload
       const formData = new FormData();
-      formData.append('file', fs.createReadStream(tempFilePath));
+  
+      if (isYouTubeURL) {
+        // Pass YouTube URL directly
+        formData.append('fileUrl', fileUrl);
+      } else if (tempFilePath) {
+        formData.append('file', fs.createReadStream(tempFilePath));
+      }
   
       // Step 4: Prepare headers
       const headers = {
         "tenantId": this.configService.get<string>('MIDDLEWARE_TENANT_ID'),
         Authorization: `Bearer ${userToken}`,
         "X-Channel-Id": this.configService.get<string>('X_CHANNEL_ID'),
-        ...formData.getHeaders(), // Includes dynamic boundary and Content-Type
+        ...formData.getHeaders(),
       };
   
       // Step 5: Prepare payload with dynamic MIME type
       const payload = {
         request: {
           content: {
-            fileUrl: fileUrl,
-            mimeType: mimeType || 'application/octet-stream',
+            fileUrl: isYouTubeURL ? fileUrl : undefined,
+            mimeType: mimeType,
           },
         },
       };
   
-      console.log('Headers:', headers);
-      console.log('Payload:', payload);
+     // console.log('Headers:', headers);
+     // console.log('Payload:', payload);
   
       // Step 6: Upload to Middleware
       const uploadUrl = `${this.middlewareUrl}/action/content/v3/upload/${contentId}`;
-      console.log('Upload URL:', uploadUrl);
+     // console.log('Upload URL:', uploadUrl);
   
       const uploadFileResponse = await axios.post(uploadUrl, formData, { headers });
   
-      console.log('File Upload Response:', uploadFileResponse.data);
+     // console.log('File Upload Response:', uploadFileResponse.data);
   
-      // Clean up temporary file
-      fs.unlinkSync(tempFilePath);
+      // Clean up temporary file if it exists
+      if (tempFilePath) {
+        fs.unlinkSync(tempFilePath);
+      }
   
       return uploadFileResponse.data;
     } catch (error) {
-      console.log('Error in upload API');
+     // console.log('Error in upload API');
       const axiosError = error as AxiosError;
   
       if (axiosError.response) {
@@ -355,10 +409,9 @@ export class ContentService {
         console.error('Error Message:', axiosError.message);
       }
   
-      throw axiosError; // Optionally rethrow the error
+      throw axiosError;
     }
   }
-  
 
   private async downloadFileToTemp(fileUrl: string, fileName: string): Promise<string> {
     const tempFilePath = path.join('/tmp', fileName);
@@ -372,7 +425,7 @@ export class ContentService {
         writer.on('error', reject);
       });
   
-      console.log(`File downloaded to: ${tempFilePath}`);
+      // console.log(`File downloaded to: ${tempFilePath}`);
       return tempFilePath;
     } catch (error) {
       if (error instanceof Error) {
@@ -384,24 +437,6 @@ export class ContentService {
       throw error;
     }
   }
-  
-  
-  private getMimeTypeFromFile(fileUrl: string): string {
-    // Extract the file extension
-    const extension = fileUrl.split('.').pop()?.toLowerCase();
-  
-    switch (extension) {
-      case 'pdf':
-        return 'application/pdf';
-      case 'mp4':
-        return 'video/mp4';
-      case 'zip':
-        return 'application/zip';
-      default:
-        throw new Error(`Unsupported file type: ${extension}`);
-    }
-  }
-
 
   private async reviewContent(contentId: string, userToken:string) {
     try {
