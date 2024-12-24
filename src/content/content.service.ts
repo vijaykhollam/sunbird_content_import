@@ -10,6 +10,10 @@ import { CourseService } from '../course/course.service';
 import { Console } from 'console';
 import { Content } from '../entities/content.entity';
 import { AxiosError } from 'axios';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import * as winston from 'winston';
+
 
 @Injectable()
 export class ContentService {
@@ -17,13 +21,31 @@ export class ContentService {
   private readonly middlewareUrl: string;
   private readonly framework: string;
   private readonly logger = new Logger(ContentService.name); // Define the logger
+  private readonly errorLogger: winston.Logger; // Explicit declaration for errorLogger
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly courseService: CourseService // Inject CourseService here
+    private readonly courseService: CourseService, // Inject CourseService here
+    @InjectRepository(Content)
+    private readonly contentRepository: Repository<Content>,
   ) {
     this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_QA_URL') || 'https://qa-middleware.tekdinext.com';
     this.framework = this.configService.get<string>('FRAMEWORK') || 'scp-framework';
+    
+    // Initialize Winston error logger for file-based error logging
+    this.errorLogger = winston.createLogger({
+        level: 'error',
+        format: winston.format.combine(
+          winston.format.timestamp(),
+          winston.format.json()
+        ),
+        transports: [
+          new winston.transports.File({
+            filename: 'logs/content_errors.log',
+            level: 'error',
+          }),
+        ],
+      });
   }
 
   async processCsvAndCreateContent(file: Express.Multer.File, userId: string, userToken: string) {
@@ -44,21 +66,6 @@ export class ContentService {
       const primaryCategory = row['PrimaryCategory'] || 'Learning Resource';
 
       try {
-
-        /*
-        const courseName = 'Course 10th Dec';
-        const description = 'Course 10th Desc';
-        const existingCourse = await this.courseService.getCourseByName(courseName);
-
-        if (existingCourse && !existingCourse.content) {
-          const existingCourse = await this.courseService.createCourse(courseName, description);
-          console.log("Course Does not exist.");
-        }
-        return;
-       */
-       
-        
-
         //  Step 1: Create Content and upload it to s3
         const createdContent = await this.createAndUploadContent(title, userId, fileUrl, primaryCategory, userToken);
         console.log('createdContent:', createdContent);
@@ -176,6 +183,46 @@ export class ContentService {
     return `${this.middlewareUrl}${endpoint}`;
   }
 
+  async findSecondTopmostParent(contentId: string): Promise<any> {
+    const result = await this.contentRepository.query(
+      `
+      WITH ParentHierarchy AS (
+          SELECT 
+              content_id, 
+              parentid, 
+              cont_title, 
+              cont_url, 
+              1 AS level
+          FROM Content
+          WHERE content_id = @0
+          
+          UNION ALL
+          
+          SELECT 
+              parent.content_id, 
+              parent.parentid, 
+              parent.cont_title, 
+              parent.cont_url, 
+              child.level + 1
+          FROM Content AS parent
+          INNER JOIN ParentHierarchy AS child
+              ON parent.content_id = child.parentid
+      )
+      SELECT TOP 1 *
+      FROM (
+          SELECT *, ROW_NUMBER() OVER (ORDER BY level DESC) AS RowNum
+          FROM ParentHierarchy
+      ) AS HierarchyWithRowNum
+      WHERE RowNum = 2
+      OPTION (MAXRECURSION 1000);
+      `,
+      [contentId]
+    );
+  
+    return result[0] || null;
+  }
+  
+
   private async createAndUploadContent(
     title: string,
     userId: string,
@@ -187,6 +234,7 @@ export class ContentService {
       const { v4: uuidv4 } = require('uuid');
       const path = require('path');
       const mime = require('mime-types'); // Ensure mime-types is installed
+      const SUPPORTED_FILE_TYPES = ['pdf', 'mp4', 'zip'];
   
       const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
       const isYouTubeURL = YOUTUBE_URL_REGEX.test(documentUrl);
@@ -218,9 +266,9 @@ export class ContentService {
             code: uniqueCode,
             mimeType: mimeType,
             primaryCategory: primaryCategory,
-            framework: this.framework,
+           // framework: this.framework,
             createdBy: userId || '15155b7a-5316-4bb2-992a-772093e85f44',
-            ...additionalFields, // Merged dynamic fields here
+         //   ...additionalFields, // Merged dynamic fields here
           },
         },
       };
@@ -235,6 +283,9 @@ export class ContentService {
         Authorization: `Bearer ${userToken}`,
         "X-Channel-Id": this.configService.get<string>('X_CHANNEL_ID'),
       };
+
+      console.log(payloadString);
+      console.log(headers);
     
       const createResponse = await axios.post(
         `${this.middlewareUrl}/action/content/v3/create`,
@@ -242,6 +293,9 @@ export class ContentService {
         { headers }
       );
   
+      console.log(createResponse);
+
+
       const { identifier: doId, versionKey } = createResponse.data.result;
       console.log('Content created:', { doId, versionKey });
   
@@ -254,8 +308,16 @@ export class ContentService {
         // Handle Regular File URLs
         const fileExtension = path.extname(new URL(documentUrl).pathname).slice(1);
   
-        if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
-          throw new Error(`Unsupported file type: ${fileExtension}`);
+        if (!SUPPORTED_FILE_TYPES.includes(fileExtension)) {
+          this.logger.warn(`Unsupported file type: ${fileExtension} for documentUrl: ${documentUrl}`);
+          this.errorLogger.warn({
+            message: 'Unsupported file type',
+            title,
+            userId,
+            documentUrl,
+            fileExtension,
+          });
+          return null; // Gracefully exit without throwing
         }
   
         // Step 2.1: Download Document
