@@ -39,11 +39,24 @@ export class CronService {
         console.log(record);
   
         // Process each record using ContentService
-        await this.contentService.processSingleContentRecord(record);
-  
-        // Mark the record as migrated
-        record.migrated = true;
+        const result = await this.contentService.processSingleContentRecord(record);
+        console.log(result);
+
+        // IF Published contennt is created then
+        if (result)
+        {
+            // Mark the record as migrated
+            record.migrated = 1;
+            record.do_id = result;
+        }
+        else
+        {
+            // Mark the record as failed to migrate
+            record.migrated = 2;
+        }
+
         await this.contentRepository.save(record);
+
   
         this.logger.log(`Successfully migrated content_id: ${record.content_id}`);
       } catch (error) {

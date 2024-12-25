@@ -7,12 +7,11 @@ import * as AWS from 'aws-sdk';
 import FormData from 'form-data';
 import * as path from 'path';
 import { CourseService } from '../course/course.service';
-import { Console } from 'console';
 import { Content } from '../entities/content.entity';
 import { AxiosError } from 'axios';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import * as winston from 'winston';
+import { DataSource } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
 
 
 @Injectable()
@@ -21,17 +20,16 @@ export class ContentService {
   private readonly middlewareUrl: string;
   private readonly framework: string;
   private readonly logger = new Logger(ContentService.name); // Define the logger
-  private readonly errorLogger: winston.Logger; // Explicit declaration for errorLogger
 
   constructor(
     private readonly configService: ConfigService,
     private readonly courseService: CourseService, // Inject CourseService here
-    @InjectRepository(Content)
-    private readonly contentRepository: Repository<Content>,
+    @InjectDataSource() private readonly dataSource: DataSource,
   ) {
     this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_QA_URL') || 'https://qa-middleware.tekdinext.com';
     this.framework = this.configService.get<string>('FRAMEWORK') || 'scp-framework';
     
+    /*
     // Initialize Winston error logger for file-based error logging
     this.errorLogger = winston.createLogger({
         level: 'error',
@@ -46,6 +44,7 @@ export class ContentService {
           }),
         ],
       });
+      */
   }
 
   async processCsvAndCreateContent(file: Express.Multer.File, userId: string, userToken: string) {
@@ -59,7 +58,7 @@ export class ContentService {
         continue;
       }
 
-      console.log('testing API');
+      //console.log('testing API');
 
       const title = row['ContentTitle'];
       const fileUrl = row['ContentURL'];
@@ -94,9 +93,6 @@ export class ContentService {
        // 
       // results.push({ id: createdContent.id, status: 'Success' });
 
-    
-
-
       } catch (error) {
         results.push({ title, status: 'Failed', error: (error as any).message });
       }
@@ -109,8 +105,7 @@ export class ContentService {
    * Method to process a single content record
    * @param record - Content entity object
    */
-    async processSingleContentRecord(record: Content): Promise<void> {
-
+    async processSingleContentRecord(record: Content): Promise<string | undefined> {
 
       const title = record.cont_title;
       const fileUrl = record.cont_url;
@@ -144,22 +139,15 @@ export class ContentService {
 
         // Step 4: Publish Content
         const publishedContent = await this.publishContent(createdContent.doId, userToken);
-        console.log('published Content:', publishedContent);        
+        console.log('published Content:', publishedContent);  
+        
+        if (publishedContent)
+        {
+          // Return Do Id when published content is returned.
+          return createdContent.doId;
+        }
       }
-   
-
-
-     /*
-     
-      this.logger.log(`Processing single content record: content_id=${record.content_id}`);
-  
-      // Add your processing logic for a single record here
-      await new Promise((resolve) => setTimeout(resolve, 500)); // Simulate processing delay
-  
-      this.logger.log(`Successfully processed content_id: ${record.content_id}`);
-      */
     }
-
 
   /*
   private async getOrCreateCourse(courseName: string): Promise<Course> {
@@ -182,6 +170,8 @@ export class ContentService {
   private getUrl(endpoint: string): string {
     return `${this.middlewareUrl}${endpoint}`;
   }
+
+  /*
 
   async findSecondTopmostParent(contentId: string): Promise<any> {
     const result = await this.contentRepository.query(
@@ -221,6 +211,7 @@ export class ContentService {
   
     return result[0] || null;
   }
+  */
   
 
   private async createAndUploadContent(
@@ -309,6 +300,7 @@ export class ContentService {
         const fileExtension = path.extname(new URL(documentUrl).pathname).slice(1);
   
         if (!SUPPORTED_FILE_TYPES.includes(fileExtension)) {
+          /*
           this.logger.warn(`Unsupported file type: ${fileExtension} for documentUrl: ${documentUrl}`);
           this.errorLogger.warn({
             message: 'Unsupported file type',
@@ -317,6 +309,7 @@ export class ContentService {
             documentUrl,
             fileExtension,
           });
+          */
           return null; // Gracefully exit without throwing
         }
   
