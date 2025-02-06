@@ -9,9 +9,10 @@ import * as path from 'path';
 import { CourseService } from '../course/course.service';
 import { Content } from '../entities/content.entity';
 import { AxiosError } from 'axios';
-import * as winston from 'winston';
 import { DataSource } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
+import { FileLoggerService } from '../logger/file-logger.service';
+import https from 'https';
 
 
 @Injectable()
@@ -25,6 +26,7 @@ export class ContentService {
     private readonly configService: ConfigService,
     private readonly courseService: CourseService, // Inject CourseService here
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly fileLogger: FileLoggerService,
   ) {
     this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_QA_URL') || 'https://qa-middleware.tekdinext.com';
     this.framework = this.configService.get<string>('FRAMEWORK') || 'scp-framework';
@@ -66,7 +68,7 @@ export class ContentService {
 
       try {
         //  Step 1: Create Content and upload it to s3
-        const createdContent = await this.createAndUploadContent(title, userId, fileUrl, primaryCategory, userToken);
+        const createdContent = await this.createAndUploadContent(row, title, userId, fileUrl, primaryCategory, userToken);
         console.log('createdContent:', createdContent);
 
         if (createdContent) {
@@ -107,18 +109,41 @@ export class ContentService {
    */
     async processSingleContentRecord(record: Content): Promise<string | undefined> {
 
+      // Log the start of the process
+      this.logger.log(`Processing content record with ID: ${Content}`);
+
       const title = record.cont_title;
       const fileUrl = record.cont_url;
+
+      /*
+       // New fields added
+        domain: ["Learning for work"],
+        subDomain: ["Career Exploration"],
+        targetAgeGroup: ["0-3 yrs", "3-6 yrs"],
+        primaryUser: ["Educators", "Learners/Children"],
+        contentLanguage: "Hindi",
+        program: ["Open School"], 
+
+      */
+
+      
+
       const primaryCategory = 'Learning Resource';
-      const userId =  this.configService.get<string>('USER_ID') || '15155b7a-5316-4bb2-992a-772093e85f44';
+      const userId =  this.configService.get<string>('USER_ID') || '';
       const userToken = this.configService.get<string>('USER_TOKEN') || '';
 
       if (!title || !fileUrl ) {
         return;
       }
 
-      const createdContent = await this.createAndUploadContent(title, userId, fileUrl, primaryCategory, userToken);
+      const createdContent = await this.createAndUploadContent(record, title, userId, fileUrl, primaryCategory, userToken);
       
+      /*
+      const createdContent = {
+        doId: 'do_214215581538918400184',
+        fileUrl: 'https://qa-knowlg-inquiry.s3-ap-south-1.amazonaws.com/content/assets/do_214215581538918400184/file.pdf'
+      };
+      */      
       
       if (!createdContent) {
         return;
@@ -215,6 +240,7 @@ export class ContentService {
   
 
   private async createAndUploadContent(
+    record: Content,
     title: string,
     userId: string,
     documentUrl: string,
@@ -225,17 +251,26 @@ export class ContentService {
       const { v4: uuidv4 } = require('uuid');
       const path = require('path');
       const mime = require('mime-types'); // Ensure mime-types is installed
-      const SUPPORTED_FILE_TYPES = ['pdf', 'mp4', 'zip'];
+      const SUPPORTED_FILE_TYPES = ['pdf', 'mp4', 'zip', 'mp3'];
   
       const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
       const isYouTubeURL = YOUTUBE_URL_REGEX.test(documentUrl);
   
       const uniqueCode = uuidv4();
-      let mimeType: string | false = false;
       let fileUrl: string = documentUrl; // Default to documentUrl
       let tempFilePath: string | null = null;
 
+      /*
+      const domain = record.DOMAIN;
+      const subDomain = record.SUB_DOMAIN;
+      const targetAgeGroup = record.TARGET_AGE_GROUP;
+      const primaryUser = record.PRIMARY_USER;
+      
+      */
+      const contentLanguage = record.CONTENT_LANGUAGE;
+      const description = record.resource_desc;
       // Framework fields
+      /*
       const additionalFields = {
         state: ["Maharashtra"],
         board: ["Maharashtra Education Board"],
@@ -246,9 +281,28 @@ export class ContentService {
         isForOpenSchool: ["Yes"],
         program: ["Second Chance"],
       };
+      */
+
+      const additionalFields = {
+        description: description,
+        // New fields added
+        domain: ["Learning for work"], // no changes needed currently
+        primaryUser: ["Educators", "Learners/Children"], // no changes needed currently
+        program: ["Open School"], // no changes needed currently
+        subDomain: ["Career Exploration"], // no changes needed currently
+        targetAgeGroup: ["14-18 yrs", "18 yrs +"], // no changes needed currently
+        contentLanguage: contentLanguage,
+        isContentMigrated:1,
+        contentType:"Resource"
+      };
   
       // Step 1: Create Content
-      mimeType = isYouTubeURL ? 'video/x-youtube' : mime.lookup(path.extname(new URL(documentUrl).pathname).slice(1)) || 'application/octet-stream';
+      const ext = path.extname(new URL(documentUrl).pathname).slice(1).toLowerCase();
+      let mimeType = isYouTubeURL 
+          ? 'video/x-youtube' 
+          : (ext === 'zip' 
+              ? 'application/vnd.ekstep.html-archive' 
+              : mime.lookup(ext) || 'application/octet-stream');
   
       const payload = {
         request: {
@@ -257,9 +311,9 @@ export class ContentService {
             code: uniqueCode,
             mimeType: mimeType,
             primaryCategory: primaryCategory,
-           // framework: this.framework,
-            createdBy: userId || '15155b7a-5316-4bb2-992a-772093e85f44',
-         //   ...additionalFields, // Merged dynamic fields here
+            framework: this.framework,
+            createdBy: userId || '',
+            ...additionalFields, // Merged dynamic fields here
           },
         },
       };
@@ -290,15 +344,19 @@ export class ContentService {
       const { identifier: doId, versionKey } = createResponse.data.result;
       console.log('Content created:', { doId, versionKey });
   
-      // Step 2: Handle Upload Logic
-      if (isYouTubeURL) {
-        // Use YouTube URL directly, skip file upload
-        this.logger.log('YouTube URL detected, skipping file download and S3 upload.');
-        fileUrl = documentUrl; // Directly use the YouTube URL
-      } else {
-        // Handle Regular File URLs
+      
+    
+      // Step 1: Check if it's a YouTube URL
+      if (/^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/.test(documentUrl)) 
+      {
+        console.log('YouTube URL detected, skipping file download and S3 upload.');
+        fileUrl = documentUrl;
+      }
+      else
+      {
+
         const fileExtension = path.extname(new URL(documentUrl).pathname).slice(1);
-  
+
         if (!SUPPORTED_FILE_TYPES.includes(fileExtension)) {
           /*
           this.logger.warn(`Unsupported file type: ${fileExtension} for documentUrl: ${documentUrl}`);
@@ -312,29 +370,92 @@ export class ContentService {
           */
           return null; // Gracefully exit without throwing
         }
-  
-        // Step 2.1: Download Document
-        const documentResponse = await axios.get(documentUrl, { responseType: 'stream' });
+    
+        // Step 2: Download Document
+        const agent = new https.Agent({  
+          rejectUnauthorized: false, // ⚠️ Disable SSL certificate validation
+        });
+
+        /*
+        const documentResponse = await axios.get(documentUrl, { responseType: 'stream', httpsAgent: agent  });
+        */
+
+        const documentResponse = await axios.get(documentUrl, { 
+          responseType: 'stream', 
+          httpsAgent: agent,
+          headers: {} // Ensure no unnecessary headers are passed
+        });
+
         tempFilePath = `/tmp/${uniqueCode}.${fileExtension}`;
         const writer = fs.createWriteStream(tempFilePath);
         documentResponse.data.pipe(writer);
-  
+    
         await new Promise((resolve, reject) => {
           writer.on('finish', resolve);
           writer.on('error', reject);
         });
-  
-        // Step 2.2: Upload to AWS S3
+    
+        // === ZIP FILE LOGIC ===
+        if (fileExtension === 'zip') {
+
+          const unzipper = require('unzipper');
+          const archiver = require('archiver');
+              
+          // Step 3: Unzip and Remove Additional Folder
+          const extractedPath = `/tmp/${uniqueCode}_extracted`;
+          fs.mkdirSync(extractedPath, { recursive: true });
+    
+          await fs.createReadStream(tempFilePath).pipe(unzipper.Extract({ path: extractedPath })).promise();
+    
+          // Check and flatten the extra folder structure
+          const extractedFiles = fs.readdirSync(extractedPath);
+          if (extractedFiles.length === 1 && fs.statSync(path.join(extractedPath, extractedFiles[0])).isDirectory()) {
+            const innerFolderPath = path.join(extractedPath, extractedFiles[0]);
+            const finalFolderPath = `/tmp/${uniqueCode}_final`;
+            fs.mkdirSync(finalFolderPath, { recursive: true });
+    
+            fs.readdirSync(innerFolderPath).forEach((file) => {
+              fs.renameSync(path.join(innerFolderPath, file), path.join(finalFolderPath, file));
+            });
+    
+            fs.rmdirSync(innerFolderPath);
+            fs.rmdirSync(extractedPath);
+          } else {
+            fs.renameSync(extractedPath, `/tmp/${uniqueCode}_final`);
+          }
+    
+          // Step 4: Re-Zip the Contents
+          const finalZipPath = `/tmp/${uniqueCode}_cleaned.zip`;
+          const output = fs.createWriteStream(finalZipPath);
+          const archive = archiver('zip', { zlib: { level: 9 } });
+    
+          archive.pipe(output);
+          archive.directory(`/tmp/${uniqueCode}_final`, false);
+          await archive.finalize();
+    
+          await new Promise((resolve, reject) => {
+            output.on('close', resolve);
+            output.on('error', reject);
+          });
+    
+          // Replace tempFilePath with the cleaned ZIP path for S3 upload
+          tempFilePath = finalZipPath;
+    
+          // Clean up temporary extraction folder
+          fs.rmSync(`/tmp/${uniqueCode}_final`, { recursive: true, force: true });
+        }
+    
+        // === AWS S3 Upload Logic ===
         AWS.config.update({
-          accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID'),
-          secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY'),
-          region: this.configService.get<string>('AWS_REGION'),
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+          region: process.env.AWS_REGION,
         });
-  
+    
         const s3 = new AWS.S3();
-        const bucketName = this.configService.get<string>('AWS_BUCKET_NAME') || '';
+        const bucketName = process.env.AWS_BUCKET_NAME || '';
         const s3Key = `content/assets/${doId}/file.${fileExtension}`;
-  
+    
         const uploadResponse = await s3
           .upload({
             Bucket: bucketName,
@@ -343,13 +464,13 @@ export class ContentService {
             ContentType: mimeType || 'application/octet-stream',
           })
           .promise();
-  
+    
         console.log('Upload successful:', uploadResponse);
-  
-        // Step 2.3: Generate the S3 URL
+    
+        // Step 5: Generate the S3 URL
         fileUrl = `https://${bucketName}.s3-${AWS.config.region}.amazonaws.com/${s3Key}`;
-  
-        // Clean up the temporary file
+    
+        // Clean up temporary files
         fs.unlinkSync(tempFilePath);
       }
   
@@ -359,6 +480,19 @@ export class ContentService {
       return { doId, versionKey, fileUrl };
   
     } catch (error) {
+
+      if (error instanceof Error) {
+        // Properly handle Error objects
+        this.logger.error(`Failed to create  content record with documentUrl: ${documentUrl}`, error.stack);
+      } else {
+        // Handle non-Error exceptions
+        const errorMessage = typeof error === 'string' ? error : JSON.stringify(error);
+        this.logger.error(`An unknown error occurred: ${errorMessage}`);
+        this.fileLogger.logError(
+          `Failed to upload content record with documentUrl: ${documentUrl}`,
+          `Unknown error: ${errorMessage}`
+        );
+      }
      // console.error("Error creating or uploading content:", error.message || error);
      // throw error;
     }
@@ -368,105 +502,187 @@ export class ContentService {
 
   private async uploadContent(contentId: string, fileUrl: string, userToken: string) {
     try {
-      const path = require('path');
-      const mime = require('mime-types'); // Ensure this library is installed
-  
+      console.log('uploadContent');
+
       const YOUTUBE_URL_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
-  
+
       // Check if the URL is a YouTube URL
       const isYouTubeURL = YOUTUBE_URL_REGEX.test(fileUrl);
-  
+
+
+      const path = require('path');
+      const mime = require('mime-types'); // Ensure this library is installed
+
       let mimeType: string | false = false;
       let tempFilePath: string | null = null;
-  
-      if (isYouTubeURL) {
-        this.logger.log('YouTube URL detected, skipping file download and S3 upload.');
-  
-        mimeType = 'text/html'; // YouTube URLs are typically treated as HTML links
-  
-      } else {
-        // Step 1: Extract file extension and MIME type dynamically
-        const fileExtension = path.extname(new URL(fileUrl).pathname).slice(1); // e.g., 'pdf'
-        mimeType = mime.lookup(fileExtension) || 'application/octet-stream';
-  
-        if (!['pdf', 'mp4', 'zip'].includes(fileExtension)) {
-          throw new Error(`Unsupported file type: ${fileExtension}`);
-        }
-  
-        // Step 2: Download the file dynamically with its correct extension
-        tempFilePath = await this.downloadFileToTemp(fileUrl, `upload_${Date.now()}.${fileExtension}`);
-  
-        if (!fs.existsSync(tempFilePath)) {
-          throw new Error(`File not found at ${tempFilePath}`);
-        }
-  
-        const stats = fs.statSync(tempFilePath);
-        // console.log(`File size: ${stats.size} bytes`);
-        // console.log(`File downloaded to: ${tempFilePath}`);
-      }
-  
+
+      
       // Step 3: Prepare FormData and Payload
       const formData = new FormData();
-  
+
       if (isYouTubeURL) {
-        // Pass YouTube URL directly
+        this.logger.log('YouTube URL detected, skipping file download and S3 upload.');
+        mimeType = 'video/x-youtube';
         formData.append('fileUrl', fileUrl);
-      } else if (tempFilePath) {
-        formData.append('file', fs.createReadStream(tempFilePath));
+      } else {
+
+        const fileExtension = path.extname(new URL(fileUrl).pathname).slice(1); // e.g., 'pdf'
+
+        mimeType = fileExtension === 'zip'
+          ? 'application/vnd.ekstep.html-archive'
+          : mime.lookup(fileExtension) || 'application/octet-stream';
+        
+        formData.append('fileUrl', fileUrl);
+
+        // Step 2: Download the file dynamically with its correct extension
+        tempFilePath = await this.downloadFileToTemp(fileUrl, `upload_${Date.now()}.${fileExtension}`);
+        // formData.append('file', fs.createReadStream(tempFilePath));
       }
-  
-      // Step 4: Prepare headers
+
+      // Step 1: Prepare headers
       const headers = {
         "tenantId": this.configService.get<string>('MIDDLEWARE_TENANT_ID'),
         Authorization: `Bearer ${userToken}`,
         "X-Channel-Id": this.configService.get<string>('X_CHANNEL_ID'),
         ...formData.getHeaders(),
       };
-  
-      // Step 5: Prepare payload with dynamic MIME type
+
+     // console.log('isYouTubeURL');
+     // console.log(fileUrl);
+
+
+      // Step 2: Prepare payload
       const payload = {
         request: {
           content: {
-            fileUrl: isYouTubeURL ? fileUrl : undefined,
+            fileUrl: fileUrl,
             mimeType: mimeType,
           },
         },
       };
-  
-     // console.log('Headers:', headers);
-     // console.log('Payload:', payload);
-  
+
+    console.log(payload);
+    console.log(formData);
+    console.log(headers);
+
       // Step 6: Upload to Middleware
       const uploadUrl = `${this.middlewareUrl}/action/content/v3/upload/${contentId}`;
      // console.log('Upload URL:', uploadUrl);
   
       const uploadFileResponse = await axios.post(uploadUrl, formData, { headers });
-  
-     // console.log('File Upload Response:', uploadFileResponse.data);
-  
-      // Clean up temporary file if it exists
-      if (tempFilePath) {
-        fs.unlinkSync(tempFilePath);
+      console.log(uploadFileResponse);
+
+
+      if (this.isZipFile(fileUrl) && uploadFileResponse.status === 500 || !uploadFileResponse.data.success) {
+        console.log('Initial upload failed. Retrying...');
+        await this.retryUntilSuccess(fileUrl);
       }
   
+    // console.log('File Upload Response:', uploadFileResponse.data);
+ 
+    // Clean up temporary file if it exists
+    if (tempFilePath) 
+    {
+        fs.unlinkSync(tempFilePath);
+    }
+
       return uploadFileResponse.data;
     } catch (error) {
-     // console.log('Error in upload API');
-      const axiosError = error as AxiosError;
-  
-      if (axiosError.response) {
-        console.error('Response Status:', axiosError.response.status);
-        console.error('Response Data:', axiosError.response.data);
-        console.error('Response Headers:', axiosError.response.headers);
-      } else if (axiosError.request) {
-        console.error('No response received:', axiosError.request);
+
+      if (axios.isAxiosError(error)) {
+        console.error('Error during file upload (Axios):', error.message);
+        if (this.isZipFile(fileUrl) && error.response?.status === 500) {
+          console.log('Retrying due to server error...');
+          await this.retryUntilSuccess(fileUrl);
+        }
+      } else if (error instanceof Error) {
+        console.error('Error during file upload (Generic):', error.message);
       } else {
-        console.error('Error Message:', axiosError.message);
+        console.error('Unknown error during file upload:', error);
       }
-  
-      throw axiosError;
+
     }
+}
+
+
+private async retryUntilSuccess(contentUrl: any) {
+
+  if (!this.isZipFile(contentUrl)) {
+    console.error(`Invalid file type: Only .zip files are supported. Provided URL: ${contentUrl}`);
+    return;
   }
+
+  let success = false;
+  let retries = 0;
+  const startTime = Date.now();
+  let uploadUrl = 'https://dev-admin.prathamdigital.org/api/content-upload/get-status';
+  let userToken = this.configService.get<string>('USER_TOKEN') || '';
+  
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": 'application/json',
+    Authorization: `Bearer ${userToken}`,
+  };
+
+  // Generate formData dynamically
+  const formData = {
+    contenturl: contentUrl
+};
+
+  while (!success) {
+    retries++;
+    try {
+      const response = await axios.post(uploadUrl, formData, { headers: headers });
+      const data = response.data;
+      console.log(`Retry ${retries}: Response -`, data);
+
+      if (data.success) {
+        success = true;
+        const endTime = Date.now();
+        const timeTaken = (endTime - startTime) / 1000; // Time in seconds
+
+        console.log(`Operation succeeded after ${retries} retries and ${timeTaken} seconds.`);
+        this.logToFile(retries, timeTaken);
+      } else {
+        console.log(`Retry ${retries}: Current status - success: ${data.success}`);
+      }
+    } catch (error) {
+
+      if (axios.isAxiosError(error)) 
+      {
+          console.error(`Retry ${retries}: Axios error occurred -`, error.message);
+      }
+      else if (error instanceof Error)
+      {
+          console.error(`Retry ${retries}: Generic error occurred -`, error.message);
+      }
+      else
+      {
+          console.error(`Retry ${retries}: Unknown error occurred -`, error);
+      }
+    }
+
+    // Wait for 2 seconds before retrying
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
+private isZipFile(fileUrl: string): boolean {
+  return fileUrl.toLowerCase().endsWith('.zip');
+}
+
+private logToFile(retries: number, timeTaken: number) {
+  const logMessage = `Success after ${retries} retries and ${timeTaken} seconds.\n`;
+  const logFilePath = 'upload_log.txt';
+
+  fs.appendFile(logFilePath, logMessage, (err) => {
+    if (err) {
+      console.error('Error writing to log file:', err.message);
+    } else {
+      console.log('Log written to file:', logFilePath);
+    }
+  });
+}
 
   private async downloadFileToTemp(fileUrl: string, fileName: string): Promise<string> {
     const tempFilePath = path.join('/tmp', fileName);
@@ -515,6 +731,7 @@ export class ContentService {
     try {
       const headers = this.getHeaders(userToken);
       const publishUrl = this.getUrl(`/action/content/v3/publish/${contentId}`);
+      const userId =  this.configService.get<string>('USER_ID') || '';
   
       console.log('Calling publishContent API:', publishUrl);
   
@@ -536,7 +753,7 @@ export class ContentService {
               "Can see the content clearly on Desktop and App",
               "Content plays correctly"
             ],
-            lastPublishedBy: "15155b7a-5316-4bb2-992a-772093e85f44",
+            lastPublishedBy: userId,
           },
         },
       };
@@ -546,6 +763,13 @@ export class ContentService {
   
       return response.data;
     } catch (error) {
+      if (axios.isAxiosError(error)) {
+        console.error('Error during Publish API (Axios):', error.message);
+      } else if (error instanceof Error) {
+        console.error('Error during Publish API (Axios):', error.message);
+      } else {
+        console.error('Error during Publish API (Axios):', error);
+      }
       //console.error('Error in publishContent:', error.response?.data || error.message);
       //throw error;
     }

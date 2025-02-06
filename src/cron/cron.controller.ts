@@ -10,5 +10,11 @@ export class CronController {
     await this.cronService.processRecords();
     return { message: 'Cron job triggered successfully.' };
   }
+
+  @Get('downloadFile')
+  async downloadFile() {
+    await this.cronService.downloadFile();
+    return { message: 'Cron job triggered successfully.' };
+  }
 }
 
