@@ -156,7 +156,7 @@ export class CronService {
       const records = await this.contentRepository
       .createQueryBuilder('c')
       .where('c.migrated = :migrated', { migrated: 0 })
-      .andWhere('c.content_id = :contentId', { contentId: 13050 })
+      .andWhere('c.content_id = :contentId', { contentId: '02c6d8c2-6bec-42b8-8249-ff659035a0e4' })
       .take(limit)
       .getMany();        
   
@@ -175,19 +175,17 @@ export class CronService {
         const result = await this.contentService.processSingleContentRecord(record);
         console.log(result);
 
-        // IF Published contennt is created then
-        if (result)
+        if (result) 
         {
-            // Mark the record as migrated
-            record.migrated = 1;
-            record.do_id = result;
+              record.migrated = 1; // ✅ Success
         }
         else
         {
-            // Mark the record as failed to migrate
-            record.migrated = 2;
-            record.do_id = result;
+              record.migrated = 2; // ❌ Failure
         }
+
+        // ✅ Assign only valid string values to `do_id`
+        record.do_id = typeof result === 'string' ? result : undefined;
 
         await this.contentRepository.save(record);
 

@@ -39,7 +39,7 @@ export class ContentController {
     @Body('userId') userId: string,
     @Body('userToken') userToken: string,
   ) {
-    return this.contentService.processCsvAndCreateContent(file, userId, userToken);
+    //return this.contentService.processCsvAndCreateContent(file, userId, userToken);
   }
 
   

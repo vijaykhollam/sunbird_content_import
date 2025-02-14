@@ -8,7 +8,7 @@ export class CourseService {
   private readonly middlewareUrl: string;
 
   constructor(private readonly configService: ConfigService) {
-    this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_QA_URL') || 'https://qa-middleware.tekdinext.com';
+    this.middlewareUrl = this.configService.get<string>('MIDDLEWARE_URL') || '';
   }
 
   async createCourse(name: string, description: string): Promise<any> {
