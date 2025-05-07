@@ -117,7 +117,7 @@ export class CronService {
         const s3 = new AWS.S3();
         const bucketName = process.env.AWS_BUCKET_NAME || '';
         const s3Key = `content/assets/${doId}/file.${fileExtension}`;
-    
+        
         const uploadResponse = await s3
           .upload({
             Bucket: bucketName,
@@ -139,7 +139,7 @@ export class CronService {
       console.log(fileUrl);
   }
 
-  async processRecords(limit: number = 3): Promise<void> {
+  async processRecords(limit: number = 20): Promise<void> {
     this.logger.log('Cron job started: Fetching records to process...');
   
     // Use QueryBuilder for the NOT EXISTS subquery

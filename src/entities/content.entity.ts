@@ -1,6 +1,6 @@
 import { Entity, Column, PrimaryColumn } from 'typeorm';
 
-@Entity('content_table') // Maps to the updated table name
+@Entity('migrated_content_english') // Maps to the updated table name
 export class Content {
   @PrimaryColumn({ type: 'char', length: 36 })
   //content_id!: string; // Primary key
@@ -50,4 +50,7 @@ export class Content {
 
   @Column({ type: 'text', nullable: true })
   convertedUrl?: string; // URL for converted files
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  old_system_content_id?: string;
 }

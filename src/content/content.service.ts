@@ -13,6 +13,8 @@ import { DataSource } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { FileLoggerService } from '../logger/file-logger.service';
 import https from 'https';
+import type { AxiosResponse } from 'axios';
+import fileType from 'file-type';
 
 
 @Injectable()
@@ -56,7 +58,10 @@ export class ContentService {
       const primaryCategory = 'Learning Resource';
       const userId =  this.configService.get<string>('USER_ID') || '';
       const userToken = this.configService.get<string>('USER_TOKEN') || '';
-
+      
+      if (!title || !fileUrl) {
+        return false;
+      }
 
       const isValidFile = await this.validateFileUrl(fileUrl, record);
 
@@ -147,6 +152,7 @@ export class ContentService {
       const PROGRAM: string | undefined = record.program;
       const SUB_DOMAIN: string | undefined = record.sub_domain;
       const TARGET_AGE_GROUP: string | undefined = record.target_age_group;
+      const old_system_content_id = record.old_system_content_id || '';
       // Framework fields
 
       // Function to handle comma-separated values and convert them into arrays
@@ -162,6 +168,7 @@ export class ContentService {
         targetAgeGroup: toArray(TARGET_AGE_GROUP),
         contentLanguage: contentLanguage,
         isContentMigrated: 1,
+        oldSystemContentId: old_system_content_id,
         contentType: "Resource"
       };
 
@@ -171,6 +178,29 @@ export class ContentService {
       let fileExtension = extFromOriginal || extFromDownloadLink;
       
         // ✅ Check if it's a Google Drive URL
+        const googleDriveMatch = /drive\.google\.com\/file\/d\/([^/]+)\//.exec(documentUrl);
+        if (googleDriveMatch) {
+          const fileId = googleDriveMatch[1];
+          documentUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+          console.log(`📁 Updated documentUrl for public file: ${documentUrl}`);
+        
+          try {
+            const response = await axios.get(documentUrl, { responseType: 'stream', timeout: 15000 });
+            const fileTypeResult = await fileType.fromStream(response.data);
+            if (fileTypeResult) {
+              fileExtension = fileTypeResult.ext.toLowerCase();
+              console.log(`✅ Inferred file type from stream: ${fileExtension}`);
+            } else {
+              console.warn(`⚠️ Could not infer file type from stream. Defaulting to 'pdf'.`);
+              fileExtension = 'pdf';
+            }
+          } catch (err) {
+            console.warn(`⚠️ Could not detect file type for Google Drive public file:`, err instanceof Error ? err.message : err);
+            fileExtension = 'pdf';
+          }
+        }        
+      
+        /*
         const googleDriveMatch = /drive\.google\.com\/file\/d\/([^/]+)\//.exec(documentUrl);
         if (googleDriveMatch) {
           try {
@@ -207,8 +237,64 @@ export class ContentService {
             }
           }
         }
-      
+        */
+       /* commented 5th may
+        const googleDriveMatch = /drive\.google\.com\/file\/d\/([^/]+)\//.exec(documentUrl);
+        if (googleDriveMatch) {
+          const fileId = googleDriveMatch[1];
+          const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
+        
+          // Attempt to fetch MIME type using Google Drive API
+          try {
+            const metadata = await axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+              params: {
+                fields: 'name,mimeType',
+                key: apiKey,
+              },
+            });
+        
+            const { name, mimeType } = metadata.data;
+            console.log(`📁 Google Drive API: name = ${name}, mimeType = ${mimeType}`);
+        
+            const extFromName = path.extname(name).slice(1).toLowerCase();
+            const extFromMime = mime.extension(mimeType);
+        
+            fileExtension = extFromName || extFromMime || '';
+            documentUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+            console.log(`📁 Updated documentUrl for streaming: ${documentUrl}`);
+          } catch (err: any) {
+            console.warn(`⚠️ Google Drive API lookup failed: ${err.response?.status} - ${err.message}`);
+            fileExtension = 'pdf'; // fallback
+          }
+        }
+      */    
+        
       // 🔄 Fallback to HEAD request if still unknown
+      // ✅ Smarter fallback using HEAD request only if extension is missing or useless
+      const knownBadExtensions = ['bin', '', undefined];
+
+      if (!fileExtension || knownBadExtensions.includes(fileExtension)) {
+        try {
+          const headResponse = await axios.head(documentUrl, { timeout: 5000 });
+          const mimeTypeFromHead = headResponse.headers['content-type'];
+
+          if (mimeTypeFromHead && mimeTypeFromHead !== 'application/octet-stream') {
+            const inferred = mime.extension(mimeTypeFromHead);
+            if (inferred) {
+              fileExtension = inferred.toLowerCase();
+              console.log(`📦 Inferred from HEAD content-type: ${fileExtension}`);
+            } else {
+              console.warn(`⚠️ MIME type detected but could not infer extension: ${mimeTypeFromHead}`);
+            }
+          } else {
+            console.warn(`⚠️ HEAD response returned generic MIME type: ${mimeTypeFromHead}`);
+          }
+        } catch (err) {
+          console.warn(`⚠️ Failed to infer file extension via HEAD:`, err instanceof Error ? err.message : err);
+        }
+      }
+
+      /*
       if (!fileExtension || fileExtension === 'bin') {
         const mimeTypeFromHead = await axios.head(documentUrl, { timeout: 5000 }).then(
           (res) => res.headers['content-type'],
@@ -223,12 +309,28 @@ export class ContentService {
           }
         }
       }
+     */ 
       
       // 🛡️ Final fallback
+      // 🛡️ Final fallback — only override if there's no valid extension
+      if (!fileExtension || !SUPPORTED_FILE_TYPES.includes(fileExtension)) {
+        console.warn(`⚠️ Could not detect or unsupported file extension: ${fileExtension}`);
+        
+        const extFromUrl = path.extname(new URL(documentUrl).pathname).slice(1).toLowerCase();
+        if (SUPPORTED_FILE_TYPES.includes(extFromUrl)) {
+          fileExtension = extFromUrl;
+          console.log(`✅ Recovered valid extension from URL: ${fileExtension}`);
+        } else {
+          fileExtension = 'pdf'; // Safe default
+          console.log(`⚠️ Defaulting to fallback extension: pdf`);
+        }
+      }
+
+      /*
       if (!fileExtension || !SUPPORTED_FILE_TYPES.includes(fileExtension)) {
         console.warn(`⚠️ Could not detect file extension. Falling back to 'pdf'.`);
         fileExtension = 'pdf';
-      }
+      }*/
       
       console.log(`✅ Final fileExtension resolved: [${fileExtension}]`);
       
@@ -270,10 +372,18 @@ export class ContentService {
       console.log(payloadString);
       console.log(headers);
     
+      /*
       const createResponse = await axios.post(
         `${this.middlewareUrl}/action/content/v3/create`,
         payload,
         { headers }
+      );
+      */
+      const createResponse = await this.retryRequest(
+        () => axios.post(`${this.middlewareUrl}/action/content/v3/create`, payload, { headers }),
+        3,
+        2000,
+        'Create Content'
       );
   
      console.log(createResponse);
@@ -306,7 +416,7 @@ export class ContentService {
         const agent = new https.Agent({  
           rejectUnauthorized: false, // ⚠️ Disable SSL certificate validation
         });
-
+        /*
         const documentResponse = await axios.get(documentUrl, { 
           responseType: 'stream', 
           httpsAgent: agent,
@@ -316,6 +426,17 @@ export class ContentService {
         tempFilePath = `/tmp/${uniqueCode}.${fileExtension}`;
         const writer = fs.createWriteStream(tempFilePath);
         documentResponse.data.pipe(writer);
+        */
+        const documentResponse = await this.fetchWithRetries<NodeJS.ReadableStream>(documentUrl, {
+          responseType: 'stream',
+          httpsAgent: agent,
+          headers: {}
+        });
+        
+        tempFilePath = `/tmp/${uniqueCode}.${fileExtension}`;
+        const writer = fs.createWriteStream(tempFilePath);
+        (documentResponse.data as NodeJS.ReadableStream).pipe(writer);
+        
     
         await new Promise((resolve, reject) => {
           writer.on('finish', resolve);
@@ -382,7 +503,8 @@ export class ContentService {
         const s3 = new AWS.S3();
         const bucketName = process.env.AWS_BUCKET_NAME || '';
         const s3Key = `content/assets/${doId}/file.${fileExtension}`;
-    
+        
+        /*
         const uploadResponse = await s3
           .upload({
             Bucket: bucketName,
@@ -391,6 +513,25 @@ export class ContentService {
             ContentType: mimeType || 'application/octet-stream',
           })
           .promise();
+        */
+          if (!tempFilePath) {
+            console.warn('tempFilePath is null. Skipping S3 upload.');
+            return null;
+          }
+          
+          const filePath: string = tempFilePath; // TypeScript now knows it's a string
+          
+          const uploadResponse = await this.retryRequest(
+            () => s3.upload({
+              Bucket: bucketName,
+              Key: s3Key,
+              Body: fs.createReadStream(filePath),
+              ContentType: mimeType || 'application/octet-stream',
+            }).promise(),
+            3,
+            2000,
+            'S3 Upload'
+          );                    
     
         console.log('Upload successful:', uploadResponse);
     
@@ -430,6 +571,33 @@ export class ContentService {
     });
 }
 
+private async fetchWithRetries<T>(
+  url: string,
+  options: any = {},
+  retries = 3,
+  delayMs = 2000
+): Promise<AxiosResponse<T>> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.get<T>(url, options);
+      return response; // Return full AxiosResponse<T>
+    } catch (error: any) {
+      const message = error?.code || error?.message || error.toString();
+
+      if (message.includes('EAI_AGAIN') || message.includes('ENOTFOUND') || message.includes('ETIMEDOUT')) {
+        console.warn(`⚠️ Attempt ${attempt} failed with network error: ${message}`);
+        if (attempt < retries) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error(`Failed to fetch ${url} after ${retries} attempts`);
+}
 
 private async validateFileUrl(fileUrl: string, record: Content): Promise<boolean> {
   const SUPPORTED_FILE_TYPES = ['pdf', 'mp4', 'zip', 'mp3'];
@@ -447,16 +615,17 @@ private async validateFileUrl(fileUrl: string, record: Content): Promise<boolean
     return true;
   }
 
+  const ext = path.extname(new URL(fileUrl).pathname).slice(1).toLowerCase();
+
   try {
-    const response = await axios.head(fileUrl, { timeout: 5000 });
+    // Primary check using HEAD request
+    const response = await axios.head(fileUrl, { timeout: 15000 });
 
     if (response.status !== 200) {
-      throw new Error(`File not found: ${fileUrl}`);
+      throw new Error(`Unexpected status code: ${response.status}`);
     }
 
-    const ext = path.extname(new URL(fileUrl).pathname).slice(1).toLowerCase();
     const mimeType = response.headers['content-type'];
-
     console.log(`File exists: ${fileUrl} (MIME: ${mimeType}, EXT: ${ext})`);
 
     if (!SUPPORTED_FILE_TYPES.includes(ext)) {
@@ -464,16 +633,36 @@ private async validateFileUrl(fileUrl: string, record: Content): Promise<boolean
     }
 
     return true;
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    const logMessage = `❌ Failed: File not found: ${fileUrl}. Title: ${record.cont_title} - ${errorMessage}`;
 
-    console.error(logMessage);
-    this.logErrorToFile(logMessage);
+  } catch (headError) {
+    console.warn(`HEAD request failed for ${fileUrl}. Attempting GET fallback...`);
 
-    return false;
+    try {
+      // Fallback check using GET request with Range header (fetch only 1st byte)
+      const response = await axios.get(fileUrl, {
+        headers: { Range: 'bytes=0-0' },
+        timeout: 15000,
+      });
+
+      const mimeType = response.headers['content-type'];
+      console.log(`(Fallback) File exists: ${fileUrl} (MIME: ${mimeType}, EXT: ${ext})`);
+
+      if (!SUPPORTED_FILE_TYPES.includes(ext)) {
+        throw new Error(`Unsupported file type: ${ext} for URL: ${fileUrl}`);
+      }
+
+      return true;
+
+    } catch (getError) {
+      const errorMessage = getError instanceof Error ? getError.message : 'Unknown fallback error';
+      const logMessage = `❌ Fallback failed: ${fileUrl}. Title: ${record.cont_title} - ${errorMessage}`;
+
+      console.error(logMessage);
+      this.logErrorToFile(logMessage);
+      return false;
+    }
   }
-}  
+}
 
   private async uploadContent(contentId: string, fileUrl: string, userToken: string) {
     try {
@@ -695,7 +884,14 @@ private logToFile(retries: number, timeTaken: number) {
 
       console.log('Calling reviewContent API:', reviewUrl);
   
-      const response = await axios.post(reviewUrl, {}, { headers });
+      //const response = await axios.post(reviewUrl, {}, { headers });
+      const response = await this.retryRequest(
+        () => axios.post(reviewUrl, {}, { headers }),
+        3,
+        2000,
+        'reviewContent'
+      );
+      
       console.log('Review API Response:', response.data);
   
       return response.data;
@@ -751,13 +947,44 @@ private logToFile(retries: number, timeTaken: number) {
   
       console.log('Publish API Response:', body);
 
-      const response = await axios.post(publishUrl, body, { headers });
+     // const response = await axios.post(publishUrl, body, { headers });
+      const response = await this.retryRequest(
+        () => axios.post(publishUrl, body, { headers }),
+        3,
+        2000,
+        'publishContent'
+      );
+      
       console.log('Publish API Response:', response.data);
   
       return response.data;
     } catch (error) {
       this.handleApiError('publishContent', error, contentId);
     }
+  }
+
+  private async retryRequest<T>(
+    fn: () => Promise<T>,
+    retries = 3,
+    delayMs = 2000,
+    label = 'API'
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const result = await fn();
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`⚠️ ${label} attempt ${attempt} failed: ${message}`);
+        if (attempt < retries) {
+          await new Promise((res) => setTimeout(res, delayMs));
+        } else {
+          this.handleApiError(label, error);
+          throw error;
+        }
+      }
+    }
+    throw new Error(`${label} failed after ${retries} retries`);
   }
   
 }
