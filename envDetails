@@ -21,4 +21,4 @@ DB_PASS=
 DB_NAME=
 
 #This is to support google drive links in content import 
-GOOGLE_DRIVE_API_KEY=AIzaSyD00Un42OrRpk2hEBEq7pdUGC3Ry54Wdq8
+GOOGLE_DRIVE_API_KEY=
