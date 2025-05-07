@@ -1,0 +1,24 @@
+ 
+MIDDLEWARE_URL=
+FRONTEND_URL=
+MIDDLEWARE_TENANT_ID=
+FRAMEWORK=
+USER_TOKEN=
+USER_ID=
+PORT=3001
+X_CHANNEL_ID=
+
+#Amazon s3 details to upload content in respective do ids
+AWS_BUCKET_NAME=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=
+
+#Local Mysql Database details where we have data in mysql tables
+DB_HOST=
+DB_USER=
+DB_PASS=
+DB_NAME=
+
+#This is to support google drive links in content import 
+GOOGLE_DRIVE_API_KEY=AIzaSyD00Un42OrRpk2hEBEq7pdUGC3Ry54Wdq8
