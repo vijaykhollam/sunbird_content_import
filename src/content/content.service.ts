@@ -181,24 +181,50 @@ export class ContentService {
         const googleDriveMatch = /drive\.google\.com\/file\/d\/([^/]+)\//.exec(documentUrl);
         if (googleDriveMatch) {
           const fileId = googleDriveMatch[1];
-          documentUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-          console.log(`📁 Updated documentUrl for public file: ${documentUrl}`);
+          const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
         
+          // First try using the Google Drive API to fetch metadata
           try {
-            const response = await axios.get(documentUrl, { responseType: 'stream', timeout: 15000 });
-            const fileTypeResult = await fileType.fromStream(response.data);
-            if (fileTypeResult) {
-              fileExtension = fileTypeResult.ext.toLowerCase();
-              console.log(`✅ Inferred file type from stream: ${fileExtension}`);
-            } else {
-              console.warn(`⚠️ Could not infer file type from stream. Defaulting to 'pdf'.`);
-              fileExtension = 'pdf';
+            const metadata = await axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+              params: {
+                fields: 'name,mimeType',
+                key: apiKey,
+              },
+            });
+        
+            const { name, mimeType } = metadata.data;
+            const extFromName = path.extname(name).slice(1).toLowerCase();
+            const extFromMime = mime.extension(mimeType);
+            fileExtension = extFromName || extFromMime || '';
+        
+            // ✅ Update documentUrl to stream raw file
+            documentUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+            console.log(`📁 Updated documentUrl for streaming: ${documentUrl}`);
+          } catch (err: any) {
+            console.warn(`⚠️ Google Drive API failed (likely not shared publicly): ${err.response?.status} - ${err.message}`);
+        
+            // 🔁 Fallback to `uc?export=download`
+            documentUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+            try {
+              const response = await axios.get(documentUrl, { responseType: 'stream', timeout: 15000 });
+              const fileTypeResult = await fileType.fromStream(response.data);
+              if (fileTypeResult) {
+                fileExtension = fileTypeResult.ext.toLowerCase();
+                console.log(`✅ Inferred file type from stream: ${fileExtension}`);
+              } else {
+                console.warn(`⚠️ Could not infer file type from stream. Defaulting to 'pdf'.`);
+                fileExtension = 'pdf';
+              }
+            } catch (streamErr) {
+              if (streamErr instanceof Error) {
+                console.warn(`❌ Fallback failed for Google Drive fileId: ${fileId} - ${streamErr.message}`);
+              } else {
+                console.warn(`❌ Fallback failed for Google Drive fileId: ${fileId}`, streamErr);
+              }              
             }
-          } catch (err) {
-            console.warn(`⚠️ Could not detect file type for Google Drive public file:`, err instanceof Error ? err.message : err);
-            fileExtension = 'pdf';
           }
-        }        
+        }
+              
       
         /*
         const googleDriveMatch = /drive\.google\.com\/file\/d\/([^/]+)\//.exec(documentUrl);
